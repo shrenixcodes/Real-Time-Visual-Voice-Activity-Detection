@@ -35,6 +35,16 @@ python run_webcam.py --camera 0
 
 Press `q` or `Esc` to stop. Use a different `--camera` index if needed.
 
+## Shrenix dashboard
+
+The dashboard replaces the separate OpenCV windows with one browser UI: live annotated camera and performance metrics at upper left, timestamped VAD events beneath it, and visual-gated Whisper transcripts at right.
+
+```powershell
+python run_dashboard.py --camera 0 --audio-device 1
+```
+
+It opens at `http://127.0.0.1:8765`. Press `Ctrl+C` in the terminal to stop it. Use `--no-stt` to validate the visual pipeline without opening a microphone.
+
 ## Optional local STT transcript window
 
 The V-VAD core is strictly visual and never opens a microphone. The demo can optionally use its debounced visual events to gate a **local**, multilingual Whisper speech-to-text stream and show a second transcript window. Audio is processed on the machine and is captured only while the visual VAD is in the speaking state. Whisper's own audio VAD filters non-speech before decoding, and low-confidence segments are withheld instead of being shown as a transcript.
