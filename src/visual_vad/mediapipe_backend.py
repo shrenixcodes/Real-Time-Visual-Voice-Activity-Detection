@@ -4,6 +4,17 @@ import math
 
 import numpy as np
 
+try:
+    import cv2
+    import mediapipe as mp
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
+except ImportError as exc:
+    raise RuntimeError(
+        "The webcam backend needs opencv-python and mediapipe. "
+        "Install requirements.txt first."
+    ) from exc
+
 from .models import BoundingBox, FaceObservation
 
 
@@ -17,36 +28,32 @@ class MediaPipeFaceMeshDetector:
     LOWER_LIP = 14
 
     def __init__(self, max_faces: int = 5) -> None:
-        try:
-            import cv2
-            import mediapipe as mp
-        except ImportError as exc:
-            raise RuntimeError(
-                "The webcam backend needs opencv-python and mediapipe. "
-                "Install requirements.txt first."
-            ) from exc
         self._cv2 = cv2
-        self._mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=max_faces,
-            refine_landmarks=False,
-            min_detection_confidence=0.55,
+        # Create FaceLandmarker options with IMAGE mode
+        base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,
+            num_faces=max_faces,
+            min_face_detection_confidence=0.55,
+            min_face_presence_confidence=0.55,
             min_tracking_confidence=0.55,
         )
+        self._detector = vision.FaceLandmarker.create_from_options(options)
 
     def detect(self, frame: np.ndarray) -> list[FaceObservation]:
         height, width = frame.shape[:2]
         rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
-        result = self._mesh.process(rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        detection_result = self._detector.detect(mp_image)
         observations: list[FaceObservation] = []
-        for index, face in enumerate(result.multi_face_landmarks or []):
-            points = face.landmark
-            xs = [point.x * width for point in points]
-            ys = [point.y * height for point in points]
+        for index, face_landmarks in enumerate(detection_result.face_landmarks or []):
+            xs = [landmark.x * width for landmark in face_landmarks]
+            ys = [landmark.y * height for landmark in face_landmarks]
             left, right = max(0.0, min(xs)), min(float(width), max(xs))
             top, bottom = max(0.0, min(ys)), min(float(height), max(ys))
-            mouth_width = self._distance(points[self.LEFT_MOUTH], points[self.RIGHT_MOUTH], width, height)
-            mouth_open = self._distance(points[self.UPPER_LIP], points[self.LOWER_LIP], width, height)
+            mouth_width = self._distance(face_landmarks[self.LEFT_MOUTH], face_landmarks[self.RIGHT_MOUTH], width, height)
+            mouth_open = self._distance(face_landmarks[self.UPPER_LIP], face_landmarks[self.LOWER_LIP], width, height)
             if mouth_width <= 1e-6:
                 continue
             observations.append(
@@ -59,7 +66,7 @@ class MediaPipeFaceMeshDetector:
         return observations
 
     def close(self) -> None:
-        self._mesh.close()
+        self._detector.close()
 
     @staticmethod
     def _distance(a: object, b: object, width: int, height: int) -> float:

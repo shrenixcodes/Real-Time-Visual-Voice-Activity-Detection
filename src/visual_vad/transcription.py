@@ -202,6 +202,7 @@ class WhisperVisualGateTranscriber:
         self._live_update_seconds = live_update_seconds
         self._live_window_bytes = int(sample_rate * live_window_seconds * 2)
         self._minimum_live_bytes = int(sample_rate * minimum_live_seconds * 2)
+        self._speech_gap_seconds = speech_gap_seconds
         cache_dir = Path(model_cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
         self._model = WhisperModel(
