@@ -9,6 +9,9 @@ Requires-Dist: opencv-python<5,>=4.8
 Requires-Dist: mediapipe==0.10.21
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
+Provides-Extra: stt
+Requires-Dist: vosk>=0.3.45; extra == "stt"
+Requires-Dist: sounddevice>=0.4.6; extra == "stt"
 
 # Real-Time Visual Voice Activity Detection
 
@@ -17,7 +20,7 @@ A standalone webcam module for a ticket-kiosk AI agent. It detects all visible f
 ## What is implemented
 
 - **Primary-user selection:** a weighted score of face area (distance proxy, 60%) and centrality (40%). After selection, the same person is retained by bounding-box IoU tracking. A larger or more animated bystander cannot steal the channel. A new track is chosen only after the old primary is absent for 750 ms.
-- **Visual VAD:** MediaPipe Face Mesh supplies lip landmarks. Mouth aspect ratio (MAR) movement is exponentially smoothed and combined with short-window MAR variability.
+- **Visual VAD:** MediaPipe Face Mesh supplies lip landmarks. Mouth aspect ratio (MAR) movement is exponentially smoothed and combined with short-window MAR variability. Variance alone is insufficient: current mouth movement must also clear a configurable floor, which suppresses closed-mouth landmark jitter.
 - **Stable events:** time-based start and end holds (160 ms / 550 ms by default) prevent chatter and make behavior less dependent on webcam frame rate.
 - **Resilience:** no-face periods produce a clean `speech_end` after the configured grace period; lost faces, face edges, and low-confidence detection are therefore treated as uncertainty rather than as a crash or immediate switch.
 - **Observability:** the demo shows every detected face, the selected primary, speaking state, visual signal, FPS, and processing time. JSON events go to stdout.
@@ -46,6 +49,19 @@ python run_webcam.py --camera 0
 ```
 
 Press `q` or `Esc` to stop. Use a different `--camera` index if needed.
+
+## Optional local STT transcript window
+
+The V-VAD core is strictly visual and never opens a microphone. The demo can optionally use its debounced visual events to gate a **local** Vosk speech-to-text stream and show a second transcript window. Audio is processed on the machine and is captured only while the visual VAD is in the speaking state.
+
+Install the optional package, download and unpack a Vosk English model (for example `vosk-model-small-en-us-0.15`) into `models/`, then run:
+
+```powershell
+python -m pip install -e ".[stt]"
+python run_webcam.py --camera 0 --stt --vosk-model models\vosk-model-small-en-us-0.15
+```
+
+Use this mode only for the interactive demo; it is not part of the assessment's visual-only VAD contract.
 
 ## Integration contract
 
@@ -86,7 +102,7 @@ If the kiosk already has its own vision detector, call `process_observations(fac
 
 ## Tuning and limitations
 
-All behavioral constants are exposed as `VisualVADConfig`, `PrimarySelectorConfig`, and `VADConfig`; no threshold is buried in the pipeline. Calibrate `motion_threshold`, `variance_threshold`, and the debounce holds against representative kiosk camera footage before production rollout.
+All behavioral constants are exposed as `VisualVADConfig`, `PrimarySelectorConfig`, and `VADConfig`; no threshold is buried in the pipeline. `variance_motion_floor` is the key false-positive control for a still, closed mouth. Calibrate it together with `motion_threshold`, `variance_threshold`, and the debounce holds against representative kiosk camera footage before production rollout.
 
 This is visual speech activity detection, not speech recognition and not identity verification. Occluded mouths, masks, extreme profiles, very small faces, poor lighting, or silent mouth movement can reduce accuracy. MediaPipe's face tracker can lose a face at an image edge; the explicit no-face timeout handles that case conservatively. For a production rollout, measure precision/recall against labelled kiosk video and record CPU, FPS, and event latency on the target hardware.
 

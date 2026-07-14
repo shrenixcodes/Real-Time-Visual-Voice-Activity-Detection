@@ -9,15 +9,28 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from pathlib import Path
 
 import cv2
+import numpy as np
 
 from visual_vad import VVADEvent, VisualVAD
 from visual_vad.mediapipe_backend import MediaPipeFaceMeshDetector
+from visual_vad.transcription import TranscriptSnapshot, VoskVisualGateTranscriber
 
 
 def print_event(event: VVADEvent) -> None:
     print(json.dumps(event.as_dict()), flush=True)
+
+
+def handle_event(event: VVADEvent, transcriber: VoskVisualGateTranscriber | None) -> None:
+    print_event(event)
+    if transcriber is None:
+        return
+    if event.event_type == "speech_start":
+        transcriber.start_utterance()
+    else:
+        transcriber.stop_utterance()
 
 
 def draw_overlay(frame, result) -> None:
@@ -37,12 +50,48 @@ def draw_overlay(frame, result) -> None:
     cv2.putText(frame, text, (10, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
 
+def draw_transcript_window(snapshot: TranscriptSnapshot) -> None:
+    canvas = np.full((250, 820, 3), 18, dtype=np.uint8)
+    status = "LISTENING" if snapshot.listening else "waiting for visual speech_start"
+    color = (60, 220, 80) if snapshot.listening else (185, 185, 185)
+    cv2.putText(canvas, f"Offline STT: {status}", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.60, color, 2)
+    y = 62
+    for text in snapshot.finalized[-3:]:
+        for line in wrap_text(text):
+            cv2.putText(canvas, line, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (240, 240, 240), 1)
+            y += 27
+    if snapshot.partial:
+        cv2.putText(canvas, f"> {snapshot.partial[:88]}", (16, 224), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (110, 190, 255), 1)
+    cv2.imshow("Visual VAD Transcript (STT)", canvas)
+
+
+def wrap_text(text: str, width: int = 88) -> list[str]:
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) > width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    return lines + ([current] if current else [])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Real-time visual voice activity detection demo")
     parser.add_argument("--camera", type=int, default=0, help="OpenCV camera index")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--max-faces", type=int, default=5)
+    parser.add_argument("--stt", action="store_true", help="Enable local, Vosk-based microphone transcription")
+    parser.add_argument(
+        "--vosk-model",
+        type=Path,
+        default=Path("models/vosk-model-small-en-us-0.15"),
+        help="Path to an unpacked local Vosk model directory",
+    )
     args = parser.parse_args()
 
     capture = cv2.VideoCapture(args.camera)
@@ -52,10 +101,13 @@ def main() -> None:
         raise RuntimeError(f"Could not open camera {args.camera}.")
 
     detector = MediaPipeFaceMeshDetector(max_faces=args.max_faces)
-    vad = VisualVAD(detector=detector, on_event=print_event)
+    transcriber: VoskVisualGateTranscriber | None = None
     started = time.monotonic()
     frames = 0
     try:
+        if args.stt:
+            transcriber = VoskVisualGateTranscriber(args.vosk_model)
+        vad = VisualVAD(detector=detector, on_event=lambda event: handle_event(event, transcriber))
         while True:
             ok, frame = capture.read()
             if not ok:
@@ -66,9 +118,13 @@ def main() -> None:
             elapsed = max(time.monotonic() - started, 1e-6)
             cv2.putText(frame, f"FPS: {frames / elapsed:.1f}", (10, frame.shape[0] - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
             cv2.imshow("Visual VAD - q to quit", frame)
+            if transcriber is not None:
+                draw_transcript_window(transcriber.snapshot())
             if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
                 break
     finally:
+        if transcriber is not None:
+            transcriber.close()
         detector.close()
         capture.release()
         cv2.destroyAllWindows()
@@ -76,4 +132,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -7,6 +7,7 @@ src/visual_vad/mediapipe_backend.py
 src/visual_vad/models.py
 src/visual_vad/pipeline.py
 src/visual_vad/selection.py
+src/visual_vad/transcription.py
 src/visual_vad.egg-info/PKG-INFO
 src/visual_vad.egg-info/SOURCES.txt
 src/visual_vad.egg-info/dependency_links.txt

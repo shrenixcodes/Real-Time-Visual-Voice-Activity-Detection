@@ -36,6 +36,7 @@ class VADConfig:
     history_seconds: float = 0.65
     motion_threshold: float = 0.010
     variance_threshold: float = 0.0035
+    variance_motion_floor: float = 0.006
     start_hold_seconds: float = 0.16
     end_hold_seconds: float = 0.55
     face_missing_end_seconds: float = 0.55
@@ -47,6 +48,7 @@ class VADConfig:
             "history_seconds",
             "motion_threshold",
             "variance_threshold",
+            "variance_motion_floor",
             "start_hold_seconds",
             "end_hold_seconds",
             "face_missing_end_seconds",
@@ -59,4 +61,3 @@ class VADConfig:
 class VisualVADConfig:
     primary: PrimarySelectorConfig = field(default_factory=PrimarySelectorConfig)
     vad: VADConfig = field(default_factory=VADConfig)
-

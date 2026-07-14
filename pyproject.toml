@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+stt = ["vosk>=0.3.45", "sounddevice>=0.4.6"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

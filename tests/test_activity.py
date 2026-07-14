@@ -46,3 +46,22 @@ def test_missing_face_ends_an_active_utterance() -> None:
     assert detector.update(None, 0.20).event_type is None
     assert detector.update(None, 0.51).event_type == "speech_end"
 
+
+def test_landmark_jitter_does_not_start_speech() -> None:
+    detector = VisualActivityDetector(
+        VADConfig(
+            ema_alpha=1.0,
+            history_seconds=0.5,
+            motion_threshold=0.015,
+            variance_threshold=0.002,
+            variance_motion_floor=0.006,
+            start_hold_seconds=0.1,
+            end_hold_seconds=0.4,
+            face_missing_end_seconds=0.4,
+        )
+    )
+    for timestamp, mar in ((0.0, 0.300), (0.05, 0.304), (0.11, 0.300), (0.18, 0.304), (0.25, 0.300)):
+        update = detector.update(mar, timestamp)
+        assert not update.raw_activity
+        assert not update.speaking
+        assert update.event_type is None

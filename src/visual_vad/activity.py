@@ -59,8 +59,16 @@ class VisualActivityDetector:
         variability = pstdev(value for _, value in self._history) if len(self._history) > 1 else 0.0
         motion_ratio = self._smoothed_motion / self.config.motion_threshold
         variability_ratio = variability / self.config.variance_threshold
-        signal = max(motion_ratio, variability_ratio)
-        raw_activity = signal >= 1.0
+        motion_active = self._smoothed_motion >= self.config.motion_threshold
+        # A static closed mouth can still produce landmark jitter and a high
+        # short-window variance. Variance is useful supporting evidence, but it
+        # is never allowed to start speech without meaningful current movement.
+        variability_active = (
+            variability >= self.config.variance_threshold
+            and self._smoothed_motion >= self.config.variance_motion_floor
+        )
+        signal = max(motion_ratio, variability_ratio if variability_active else 0.0)
+        raw_activity = motion_active or variability_active
         return self._apply_debounce(raw_activity, signal, timestamp, self.config.end_hold_seconds)
 
     def _handle_missing_face(self, timestamp: float) -> ActivityUpdate:
@@ -100,4 +108,3 @@ class VisualActivityDetector:
         cutoff = timestamp - self.config.history_seconds
         while self._history and self._history[0][0] < cutoff:
             self._history.popleft()
-
