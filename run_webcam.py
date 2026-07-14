@@ -24,6 +24,11 @@ from visual_vad.transcription import (
 )
 
 
+def parse_audio_device(value: str) -> str | int:
+    """Accept either a numeric sounddevice ID or a descriptive device name."""
+    return int(value) if value.isdigit() else value
+
+
 def print_event(event: VVADEvent) -> None:
     print(json.dumps(event.as_dict()), flush=True)
 
@@ -111,8 +116,25 @@ def main() -> None:
         help="Git-ignored local cache for a downloaded Whisper model",
     )
     parser.add_argument("--language", default=None, help="Optional spoken-language code, such as en or hi")
-    parser.add_argument("--audio-device", default=None, help="Microphone name or index; use a directional kiosk mic")
+    parser.add_argument(
+        "--audio-device",
+        type=parse_audio_device,
+        default=None,
+        help="Microphone name or index; use a directional kiosk mic",
+    )
+    parser.add_argument(
+        "--initial-prompt",
+        default=None,
+        help="Optional domain terms to improve recognition, for example ticket names or station names",
+    )
+    parser.add_argument("--list-audio-devices", action="store_true", help="Print available microphone devices and exit")
     args = parser.parse_args()
+
+    if args.list_audio_devices:
+        import sounddevice as sd
+
+        print(sd.query_devices())
+        return
 
     capture = cv2.VideoCapture(args.camera)
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
@@ -132,6 +154,7 @@ def main() -> None:
                     language=args.language,
                     input_device=args.audio_device,
                     model_cache_dir=args.whisper_cache,
+                    initial_prompt=args.initial_prompt,
                 )
             else:
                 transcriber = VoskVisualGateTranscriber(args.vosk_model)

@@ -48,6 +48,8 @@ python run_webcam.py --camera 0 --stt --whisper-model small --language en
 
 `--stt-backend vosk` remains available as a lightweight fallback and requires `python -m pip install -e ".[stt-vosk]"` plus a local model directory.
 
+Use `python run_webcam.py --list-audio-devices` to find the deployed microphone, then pass its name or index through `--audio-device`. `--initial-prompt` can contain common ticket, venue, or station names to reduce domain-specific recognition errors.
+
 ### Crowded-kiosk deployment
 
 Software alone cannot identify which person supplied a sound when several people reach the same omnidirectional microphone. The visual gate reduces when audio is transcribed, but it is not an audio source separator. For a production kiosk, use a directional microphone array co-located and calibrated with the camera, enable its beamforming/noise suppression, and select it through `--audio-device`. Measure word-error rate by accent, language, microphone placement, noise level, and customer distance before deployment. Never treat an STT transcript as an authoritative transaction instruction without confirmation.
