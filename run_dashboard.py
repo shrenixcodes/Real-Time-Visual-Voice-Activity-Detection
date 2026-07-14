@@ -29,17 +29,18 @@ def main() -> None:
     parser.add_argument("--audio-device", type=parse_audio_device, default=None)
     parser.add_argument("--initial-prompt", default=None)
     parser.add_argument(
-        "--partial-chunk-seconds",
+        "--live-update-seconds",
         type=float,
-        default=2.2,
-        help="Seconds of speech before the first live Whisper partial is shown",
+        default=0.85,
+        help="Cadence for revisable live Whisper transcript updates",
     )
     parser.add_argument(
-        "--chunk-overlap-seconds",
+        "--live-window-seconds",
         type=float,
-        default=0.35,
-        help="Context overlap used to keep words accurate across live STT chunks",
+        default=5.0,
+        help="Recent-audio window used for revisable live transcript updates",
     )
+    parser.add_argument("--speech-gap-seconds", type=float, default=1.10, help="Pause before committing a final sentence")
     parser.add_argument("--no-browser", action="store_true", help="Do not automatically open the dashboard URL")
     args = parser.parse_args()
 
@@ -55,8 +56,9 @@ def main() -> None:
         language=args.language or None,
         audio_device=args.audio_device,
         initial_prompt=args.initial_prompt,
-        partial_chunk_seconds=args.partial_chunk_seconds,
-        chunk_overlap_seconds=args.chunk_overlap_seconds,
+        live_update_seconds=args.live_update_seconds,
+        live_window_seconds=args.live_window_seconds,
+        speech_gap_seconds=args.speech_gap_seconds,
     )
     server = create_dashboard_server(args.host, args.port, config)
     url = f"http://{args.host}:{args.port}"

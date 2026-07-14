@@ -10,6 +10,7 @@ import json
 import queue
 import re
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,13 @@ class VisualGateTranscriber(Protocol):
     def snapshot(self) -> TranscriptSnapshot: ...
 
     def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class _WhisperJob:
+    session_id: int
+    audio: bytes
+    final: bool
 
 
 class VoskVisualGateTranscriber:
@@ -154,10 +162,10 @@ class VoskVisualGateTranscriber:
 class WhisperVisualGateTranscriber:
     """Higher-accuracy, multilingual offline STT for noisy kiosk deployments.
 
-    Short audio chunks are decoded while the primary user is still speaking,
-    which keeps the dashboard responsive. The final trailing chunk completes
-    the utterance after speech end. Overlap-aware text merging prevents the
-    context overlap from repeating words in the transcript.
+    A rolling window is decoded while the user is speaking. The resulting
+    draft is intentionally revisable: Whisper can correct a word as more
+    context arrives. After a short visual-VAD gap, a final high-confidence pass
+    over the complete utterance is committed to the transcript.
     """
 
     def __init__(
@@ -170,9 +178,11 @@ class WhisperVisualGateTranscriber:
         compute_type: str = "int8",
         initial_prompt: str | None = None,
         model_cache_dir: str | Path = "models/whisper",
-        partial_chunk_seconds: float = 2.2,
-        overlap_seconds: float = 0.35,
-        beam_size: int = 5,
+        live_update_seconds: float = 0.85,
+        live_window_seconds: float = 5.0,
+        minimum_live_seconds: float = 0.80,
+        speech_gap_seconds: float = 1.10,
+        final_beam_size: int = 5,
     ) -> None:
         try:
             import sounddevice as sd
@@ -186,9 +196,12 @@ class WhisperVisualGateTranscriber:
         self._sample_rate = sample_rate
         self._language = language
         self._initial_prompt = initial_prompt
-        self._beam_size = beam_size
-        if partial_chunk_seconds <= 0 or overlap_seconds < 0:
-            raise ValueError("STT chunk durations must be non-negative and the chunk duration must be positive.")
+        if min(live_update_seconds, live_window_seconds, minimum_live_seconds, speech_gap_seconds) <= 0:
+            raise ValueError("Live STT timings must be positive.")
+        self._final_beam_size = final_beam_size
+        self._live_update_seconds = live_update_seconds
+        self._live_window_bytes = int(sample_rate * live_window_seconds * 2)
+        self._minimum_live_bytes = int(sample_rate * minimum_live_seconds * 2)
         cache_dir = Path(model_cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
         self._model = WhisperModel(
@@ -197,16 +210,16 @@ class WhisperVisualGateTranscriber:
             compute_type=compute_type,
             download_root=str(cache_dir),
         )
-        self._queue: queue.Queue[tuple[int, bytes, bool] | None] = queue.Queue()
+        self._jobs: deque[_WhisperJob] = deque()
         self._lock = threading.Lock()
+        self._job_ready = threading.Condition(self._lock)
         self._session_id = 0
+        self._active_session: int | None = None
         self._recording = False
         self._audio_buffers: dict[int, bytearray] = {}
-        self._queued_to: dict[int, int] = {}
-        self._session_text: dict[int, str] = {}
         self._preroll: deque[bytes] = deque(maxlen=2)  # 500 ms at the 4,000-sample block size.
-        self._chunk_bytes = int(sample_rate * partial_chunk_seconds * 2)
-        self._overlap_bytes = int(sample_rate * overlap_seconds * 2)
+        self._last_live_update = 0.0
+        self._finish_timer: threading.Timer | None = None
         self._finalized: list[str] = []
         self._partial = ""
         self._closed = False
@@ -226,14 +239,22 @@ class WhisperVisualGateTranscriber:
         with self._lock:
             if self._closed or self._recording:
                 return
+            if self._finish_timer is not None and self._active_session is not None:
+                # Visual VAD briefly toggled quiet, then detected speech again.
+                # Keep audio and context in one continuous utterance.
+                self._finish_timer.cancel()
+                self._finish_timer = None
+                self._recording = True
+                self._partial = self._partial or "Listening..."
+                return
             self._session_id += 1
             buffer = bytearray()
             for chunk in self._preroll:
                 buffer.extend(chunk)
             self._audio_buffers[self._session_id] = buffer
-            self._queued_to[self._session_id] = 0
-            self._session_text[self._session_id] = ""
+            self._active_session = self._session_id
             self._recording = True
+            self._last_live_update = 0.0
             self._partial = "Listening..."
 
     def stop_utterance(self) -> None:
@@ -242,8 +263,12 @@ class WhisperVisualGateTranscriber:
                 return
             session_id = self._session_id
             self._recording = False
-            self._partial = "Transcribing..."
-            self._enqueue_chunk(session_id, final=True)
+            self._partial = "Listening for a final phrase..."
+            if self._finish_timer is not None:
+                self._finish_timer.cancel()
+            self._finish_timer = threading.Timer(self._speech_gap_seconds, self._queue_final, args=(session_id,))
+            self._finish_timer.daemon = True
+            self._finish_timer.start()
 
     def snapshot(self) -> TranscriptSnapshot:
         with self._lock:
@@ -255,11 +280,16 @@ class WhisperVisualGateTranscriber:
                 return
             self._closed = True
             self._recording = False
+            if self._finish_timer is not None:
+                self._finish_timer.cancel()
+                self._finish_timer = None
             self._audio_buffers.clear()
-            self._queued_to.clear()
+            self._jobs.clear()
         self._stream.stop()
         self._stream.close()
-        self._queue.put(None)
+        with self._job_ready:
+            self._jobs.append(_WhisperJob(-1, b"", False))
+            self._job_ready.notify_all()
         self._worker.join(timeout=10.0)
 
     def _on_audio(self, indata: bytes, frames: int, time_info: object, status: object) -> None:
@@ -269,68 +299,69 @@ class WhisperVisualGateTranscriber:
             self._preroll.append(chunk)
             if self._recording:
                 self._audio_buffers[self._session_id].extend(chunk)
-                self._enqueue_chunk(self._session_id, final=False)
+                now = time.monotonic()
+                if (
+                    len(self._audio_buffers[self._session_id]) >= self._minimum_live_bytes
+                    and now - self._last_live_update >= self._live_update_seconds
+                ):
+                    audio = self._audio_buffers[self._session_id]
+                    self._enqueue_live_revision(self._session_id, bytes(audio[-self._live_window_bytes :]))
+                    self._last_live_update = now
 
-    def _enqueue_chunk(self, session_id: int, final: bool) -> None:
-        """Queue a bounded chunk while holding ``_lock``.
+    def _enqueue_live_revision(self, session_id: int, audio: bytes) -> None:
+        # Keep only the newest revision for this utterance when CPU inference
+        # cannot keep up. Showing stale partials is worse than skipping one.
+        self._jobs = deque(job for job in self._jobs if job.final or job.session_id != session_id)
+        self._jobs.append(_WhisperJob(session_id, audio, False))
+        self._job_ready.notify()
 
-        Each live chunk has a small look-back window so words crossing a chunk
-        boundary retain context. Work is only performed in the decoder thread.
-        """
-        buffer = self._audio_buffers.get(session_id)
-        if buffer is None:
-            return
-        end = len(buffer)
-        queued_to = self._queued_to.get(session_id, 0)
-        if not final and end - queued_to < self._chunk_bytes:
-            return
-        if end > queued_to:
-            start = max(0, queued_to - self._overlap_bytes)
-            self._queue.put((session_id, bytes(buffer[start:end]), final))
-            self._queued_to[session_id] = end
-        elif final:
-            # A previous live chunk already covers the complete utterance. A
-            # marker preserves FIFO ordering and finalizes after that chunk.
-            self._queue.put((session_id, b"", True))
-        if final:
-            self._audio_buffers.pop(session_id, None)
-            self._queued_to.pop(session_id, None)
+    def _queue_final(self, session_id: int) -> None:
+        with self._job_ready:
+            if self._closed or self._recording or self._active_session != session_id:
+                return
+            audio = bytes(self._audio_buffers.pop(session_id, b""))
+            self._active_session = None
+            self._finish_timer = None
+            self._partial = "Finalizing transcript..."
+            # Final decoding must come after the newest live revision so that
+            # the UI remains responsive until the authoritative result arrives.
+            self._jobs.append(_WhisperJob(session_id, audio, True))
+            self._job_ready.notify()
 
     def _transcribe_utterances(self) -> None:
         while True:
-            item = self._queue.get()
-            if item is None:
+            with self._job_ready:
+                while not self._jobs:
+                    self._job_ready.wait()
+                item = self._jobs.popleft()
+            if item.session_id == -1:
                 return
-            session_id, payload, final = item
             try:
-                transcript = self._decode(payload) if payload else ""
+                transcript = self._decode(item.audio, self._final_beam_size if item.final else 1) if item.audio else ""
                 with self._lock:
-                    if transcript:
-                        self._session_text[session_id] = merge_transcript_text(
-                            self._session_text.get(session_id, ""), transcript
-                        )
-                    merged = self._session_text.get(session_id, "")
-                    if final:
-                        if merged:
-                            self._finalized.append(merged)
-                            if session_id == self._session_id:
-                                self._partial = ""
-                        elif session_id == self._session_id:
+                    if item.final:
+                        if transcript:
+                            self._finalized.append(transcript)
+                        elif item.session_id == self._session_id:
                             self._partial = "No confident speech recognized."
-                        self._session_text.pop(session_id, None)
-                    elif session_id == self._session_id:
-                        self._partial = merged or "Listening..."
+                        if item.session_id == self._session_id and transcript:
+                            self._partial = ""
+                    elif item.session_id == self._active_session and self._recording:
+                        # This is a live, replaceable draft, not an appended
+                        # immutable segment. It visibly corrects itself as the
+                        # next rolling audio window supplies more context.
+                        self._partial = transcript or "Listening..."
             except Exception as exc:
                 with self._lock:
-                    if session_id == self._session_id:
+                    if item.session_id == self._session_id:
                         self._partial = f"STT error: {exc}"
 
-    def _decode(self, payload: bytes) -> str:
+    def _decode(self, payload: bytes, beam_size: int) -> str:
         audio = np.frombuffer(payload, dtype=np.int16).astype(np.float32) / 32768.0
         segments, _ = self._model.transcribe(
             audio,
             language=self._language,
-            beam_size=self._beam_size,
+            beam_size=beam_size,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 300},
             condition_on_previous_text=False,
