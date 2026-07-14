@@ -45,6 +45,12 @@ python run_dashboard.py --camera 0 --audio-device 1
 
 It opens at `http://127.0.0.1:8765`. Press `Ctrl+C` in the terminal to stop it. Use `--no-stt` to validate the visual pipeline without opening a microphone.
 
+Whisper now shows a rolling live partial after about 2.2 seconds of detected speech, then commits a de-duplicated final line when the utterance ends. For terms such as ticket names or station names, add an initial prompt:
+
+```powershell
+python run_dashboard.py --camera 0 --audio-device 1 --initial-prompt "ticket, platform, station, booking, destination"
+```
+
 ## Optional local STT transcript window
 
 The V-VAD core is strictly visual and never opens a microphone. The demo can optionally use its debounced visual events to gate a **local**, multilingual Whisper speech-to-text stream and show a second transcript window. Audio is processed on the machine and is captured only while the visual VAD is in the speaking state. Whisper's own audio VAD filters non-speech before decoding, and low-confidence segments are withheld instead of being shown as a transcript.

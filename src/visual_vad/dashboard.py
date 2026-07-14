@@ -36,6 +36,8 @@ class DashboardConfig:
     language: Optional[str] = "en"
     audio_device: str | int | None = None
     initial_prompt: Optional[str] = None
+    partial_chunk_seconds: float = 2.2
+    chunk_overlap_seconds: float = 0.35
 
 
 class DashboardState:
@@ -159,6 +161,8 @@ class DashboardRuntime:
                         input_device=self.config.audio_device,
                         model_cache_dir=self.config.whisper_cache,
                         initial_prompt=self.config.initial_prompt,
+                        partial_chunk_seconds=self.config.partial_chunk_seconds,
+                        overlap_seconds=self.config.chunk_overlap_seconds,
                     )
                 else:
                     transcriber = VoskVisualGateTranscriber(Path("models/vosk-model-small-en-us-0.15"))
