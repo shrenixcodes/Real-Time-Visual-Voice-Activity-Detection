@@ -64,4 +64,3 @@ class MediaPipeFaceMeshDetector:
     @staticmethod
     def _distance(a: object, b: object, width: int, height: int) -> float:
         return math.hypot((a.x - b.x) * width, (a.y - b.y) * height)  # type: ignore[attr-defined]
-

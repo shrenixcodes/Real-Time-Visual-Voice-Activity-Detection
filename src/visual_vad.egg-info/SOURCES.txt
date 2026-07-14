@@ -14,5 +14,6 @@ src/visual_vad.egg-info/dependency_links.txt
 src/visual_vad.egg-info/requires.txt
 src/visual_vad.egg-info/top_level.txt
 tests/test_activity.py
+tests/test_cli.py
 tests/test_pipeline.py
 tests/test_selection.py

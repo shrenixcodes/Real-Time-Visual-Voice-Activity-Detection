@@ -57,7 +57,7 @@ Press `q` or `Esc` to stop. Use a different `--camera` index if needed.
 
 The V-VAD core is strictly visual and never opens a microphone. The demo can optionally use its debounced visual events to gate a **local**, multilingual Whisper speech-to-text stream and show a second transcript window. Audio is processed on the machine and is captured only while the visual VAD is in the speaking state. Whisper's own audio VAD filters non-speech before decoding, and low-confidence segments are withheld instead of being shown as a transcript.
 
-Install the optional package, then run the default `small` Whisper model. Its model files are downloaded and cached on first use. Leave `--language` unset for automatic language detection, or set it when the kiosk has a known primary language:
+Install the optional package, then run the default `small` Whisper model. Its model files are downloaded and cached under the git-ignored `models/whisper/` folder on first use. Leave `--language` unset for automatic language detection, or set it when the kiosk has a known primary language:
 
 ```powershell
 python -m pip install -e ".[stt]"
@@ -65,6 +65,8 @@ python run_webcam.py --camera 0 --stt --whisper-model small --language en
 ```
 
 `--stt-backend vosk` remains available as a lightweight fallback and requires `python -m pip install -e ".[stt-vosk]"` plus a local model directory.
+
+Use `python run_webcam.py --list-audio-devices` to find the deployed microphone, then pass its name or index through `--audio-device`. `--initial-prompt` can contain common ticket, venue, or station names to reduce domain-specific recognition errors.
 
 ### Crowded-kiosk deployment
 
