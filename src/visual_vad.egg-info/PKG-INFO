@@ -4,9 +4,9 @@ Version: 0.1.0
 Summary: Real-time visual voice activity detection for a kiosk primary user
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
-Requires-Dist: numpy>=1.24
-Requires-Dist: opencv-python>=4.8
-Requires-Dist: mediapipe>=0.10.14
+Requires-Dist: numpy<2,>=1.24
+Requires-Dist: opencv-python<5,>=4.8
+Requires-Dist: mediapipe==0.10.21
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
 
