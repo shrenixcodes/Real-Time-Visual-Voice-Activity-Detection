@@ -1,0 +1,6 @@
+numpy>=1.24
+opencv-python>=4.8
+mediapipe>=0.10.14
+
+[dev]
+pytest>=8.0

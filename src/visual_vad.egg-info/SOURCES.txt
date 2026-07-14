@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+src/visual_vad/__init__.py
+src/visual_vad/activity.py
+src/visual_vad/config.py
+src/visual_vad/mediapipe_backend.py
+src/visual_vad/models.py
+src/visual_vad/pipeline.py
+src/visual_vad/selection.py
+src/visual_vad.egg-info/PKG-INFO
+src/visual_vad.egg-info/SOURCES.txt
+src/visual_vad.egg-info/dependency_links.txt
+src/visual_vad.egg-info/requires.txt
+src/visual_vad.egg-info/top_level.txt
+tests/test_activity.py
+tests/test_pipeline.py
+tests/test_selection.py
