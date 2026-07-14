@@ -37,14 +37,20 @@ Press `q` or `Esc` to stop. Use a different `--camera` index if needed.
 
 ## Optional local STT transcript window
 
-The V-VAD core is strictly visual and never opens a microphone. The demo can optionally use its debounced visual events to gate a **local** Vosk speech-to-text stream and show a second transcript window. Audio is processed on the machine and is captured only while the visual VAD is in the speaking state.
+The V-VAD core is strictly visual and never opens a microphone. The demo can optionally use its debounced visual events to gate a **local**, multilingual Whisper speech-to-text stream and show a second transcript window. Audio is processed on the machine and is captured only while the visual VAD is in the speaking state. Whisper's own audio VAD filters non-speech before decoding, and low-confidence segments are withheld instead of being shown as a transcript.
 
-Install the optional package, download and unpack a Vosk English model (for example `vosk-model-small-en-us-0.15`) into `models/`, then run:
+Install the optional package, then run the default `small` Whisper model. Its model files are downloaded and cached under the git-ignored `models/whisper/` folder on first use. Leave `--language` unset for automatic language detection, or set it when the kiosk has a known primary language:
 
 ```powershell
 python -m pip install -e ".[stt]"
-python run_webcam.py --camera 0 --stt --vosk-model models\vosk-model-small-en-us-0.15
+python run_webcam.py --camera 0 --stt --whisper-model small --language en
 ```
+
+`--stt-backend vosk` remains available as a lightweight fallback and requires `python -m pip install -e ".[stt-vosk]"` plus a local model directory.
+
+### Crowded-kiosk deployment
+
+Software alone cannot identify which person supplied a sound when several people reach the same omnidirectional microphone. The visual gate reduces when audio is transcribed, but it is not an audio source separator. For a production kiosk, use a directional microphone array co-located and calibrated with the camera, enable its beamforming/noise suppression, and select it through `--audio-device`. Measure word-error rate by accent, language, microphone placement, noise level, and customer distance before deployment. Never treat an STT transcript as an authoritative transaction instruction without confirmation.
 
 Use this mode only for the interactive demo; it is not part of the assessment's visual-only VAD contract.
 

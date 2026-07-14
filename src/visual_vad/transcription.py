@@ -9,8 +9,12 @@ from __future__ import annotations
 import json
 import queue
 import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
+
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -18,6 +22,18 @@ class TranscriptSnapshot:
     finalized: tuple[str, ...]
     partial: str
     listening: bool
+
+
+class VisualGateTranscriber(Protocol):
+    """Shared contract for optional audio transcription backends."""
+
+    def start_utterance(self) -> None: ...
+
+    def stop_utterance(self) -> None: ...
+
+    def snapshot(self) -> TranscriptSnapshot: ...
+
+    def close(self) -> None: ...
 
 
 class VoskVisualGateTranscriber:
@@ -132,3 +148,145 @@ class VoskVisualGateTranscriber:
             if text:
                 self._finalized.append(text)
             self._partial = ""
+
+
+class WhisperVisualGateTranscriber:
+    """Higher-accuracy, multilingual offline STT for noisy kiosk deployments.
+
+    Whisper is run after each visual utterance ends, rather than continually on
+    every microphone sample. Its built-in audio VAD discards non-speech before
+    decoding, while the visual gate keeps unrelated background activity out of
+    the request whenever the primary user is quiet.
+    """
+
+    def __init__(
+        self,
+        model_size: str = "small",
+        language: str | None = None,
+        input_device: str | int | None = None,
+        sample_rate: int = 16_000,
+        device: str = "cpu",
+        compute_type: str = "int8",
+        initial_prompt: str | None = None,
+        model_cache_dir: str | Path = "models/whisper",
+    ) -> None:
+        try:
+            import sounddevice as sd
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise RuntimeError(
+                "Whisper STT needs the optional dependencies. Install with: "
+                "python -m pip install -e '.[stt]'"
+            ) from exc
+
+        self._sample_rate = sample_rate
+        self._language = language
+        self._initial_prompt = initial_prompt
+        cache_dir = Path(model_cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        self._model = WhisperModel(
+            model_size,
+            device=device,
+            compute_type=compute_type,
+            download_root=str(cache_dir),
+        )
+        self._queue: queue.Queue[tuple[int, bytes] | None] = queue.Queue()
+        self._lock = threading.Lock()
+        self._session_id = 0
+        self._recording = False
+        self._chunks: dict[int, list[bytes]] = {}
+        self._preroll: deque[bytes] = deque(maxlen=2)  # 500 ms at the 4,000-sample block size.
+        self._finalized: list[str] = []
+        self._partial = ""
+        self._closed = False
+        self._worker = threading.Thread(target=self._transcribe_utterances, name="whisper-stt", daemon=True)
+        self._worker.start()
+        self._stream = sd.RawInputStream(
+            samplerate=sample_rate,
+            blocksize=4_000,
+            dtype="int16",
+            channels=1,
+            device=input_device,
+            callback=self._on_audio,
+        )
+        self._stream.start()
+
+    def start_utterance(self) -> None:
+        with self._lock:
+            if self._closed or self._recording:
+                return
+            self._session_id += 1
+            self._chunks[self._session_id] = list(self._preroll)
+            self._recording = True
+            self._partial = "Listening..."
+
+    def stop_utterance(self) -> None:
+        with self._lock:
+            if not self._recording:
+                return
+            session_id = self._session_id
+            self._recording = False
+            payload = b"".join(self._chunks.pop(session_id, []))
+            self._partial = "Transcribing..."
+        if payload:
+            self._queue.put((session_id, payload))
+        else:
+            with self._lock:
+                self._partial = ""
+
+    def snapshot(self) -> TranscriptSnapshot:
+        with self._lock:
+            return TranscriptSnapshot(tuple(self._finalized), self._partial, self._recording)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._recording = False
+            self._chunks.clear()
+        self._stream.stop()
+        self._stream.close()
+        self._queue.put(None)
+        self._worker.join(timeout=10.0)
+
+    def _on_audio(self, indata: bytes, frames: int, time_info: object, status: object) -> None:
+        del frames, time_info, status
+        chunk = bytes(indata)
+        with self._lock:
+            self._preroll.append(chunk)
+            if self._recording:
+                self._chunks[self._session_id].append(chunk)
+
+    def _transcribe_utterances(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            session_id, payload = item
+            try:
+                audio = np.frombuffer(payload, dtype=np.int16).astype(np.float32) / 32768.0
+                segments, _ = self._model.transcribe(
+                    audio,
+                    language=self._language,
+                    beam_size=5,
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 300},
+                    condition_on_previous_text=False,
+                    initial_prompt=self._initial_prompt,
+                )
+                accepted = [
+                    segment.text.strip()
+                    for segment in segments
+                    if segment.text.strip()
+                    and segment.avg_logprob >= -1.0
+                    and segment.no_speech_prob <= 0.60
+                ]
+                transcript = " ".join(accepted)
+                with self._lock:
+                    if transcript:
+                        self._finalized.append(transcript)
+                    self._partial = "" if transcript else "No confident speech recognized."
+            except Exception as exc:
+                with self._lock:
+                    self._partial = f"STT error: {exc}"

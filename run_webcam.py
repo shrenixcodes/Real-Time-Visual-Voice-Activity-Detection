@@ -16,14 +16,19 @@ import numpy as np
 
 from visual_vad import VVADEvent, VisualVAD
 from visual_vad.mediapipe_backend import MediaPipeFaceMeshDetector
-from visual_vad.transcription import TranscriptSnapshot, VoskVisualGateTranscriber
+from visual_vad.transcription import (
+    TranscriptSnapshot,
+    VisualGateTranscriber,
+    VoskVisualGateTranscriber,
+    WhisperVisualGateTranscriber,
+)
 
 
 def print_event(event: VVADEvent) -> None:
     print(json.dumps(event.as_dict()), flush=True)
 
 
-def handle_event(event: VVADEvent, transcriber: VoskVisualGateTranscriber | None) -> None:
+def handle_event(event: VVADEvent, transcriber: VisualGateTranscriber | None) -> None:
     print_event(event)
     if transcriber is None:
         return
@@ -50,11 +55,11 @@ def draw_overlay(frame, result) -> None:
     cv2.putText(frame, text, (10, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
 
-def draw_transcript_window(snapshot: TranscriptSnapshot) -> None:
+def draw_transcript_window(snapshot: TranscriptSnapshot, backend: str) -> None:
     canvas = np.full((250, 820, 3), 18, dtype=np.uint8)
     status = "LISTENING" if snapshot.listening else "waiting for visual speech_start"
     color = (60, 220, 80) if snapshot.listening else (185, 185, 185)
-    cv2.putText(canvas, f"Offline STT: {status}", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.60, color, 2)
+    cv2.putText(canvas, f"{backend.upper()} STT: {status}", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.60, color, 2)
     y = 62
     for text in snapshot.finalized[-3:]:
         for line in wrap_text(text):
@@ -87,11 +92,26 @@ def main() -> None:
     parser.add_argument("--max-faces", type=int, default=5)
     parser.add_argument("--stt", action="store_true", help="Enable local, Vosk-based microphone transcription")
     parser.add_argument(
+        "--stt-backend",
+        choices=("whisper", "vosk"),
+        default="whisper",
+        help="Whisper is the higher-accuracy default; Vosk is a lightweight fallback",
+    )
+    parser.add_argument(
         "--vosk-model",
         type=Path,
         default=Path("models/vosk-model-small-en-us-0.15"),
         help="Path to an unpacked local Vosk model directory",
     )
+    parser.add_argument("--whisper-model", default="small", help="Whisper model name or local model path")
+    parser.add_argument(
+        "--whisper-cache",
+        type=Path,
+        default=Path("models/whisper"),
+        help="Git-ignored local cache for a downloaded Whisper model",
+    )
+    parser.add_argument("--language", default=None, help="Optional spoken-language code, such as en or hi")
+    parser.add_argument("--audio-device", default=None, help="Microphone name or index; use a directional kiosk mic")
     args = parser.parse_args()
 
     capture = cv2.VideoCapture(args.camera)
@@ -101,12 +121,20 @@ def main() -> None:
         raise RuntimeError(f"Could not open camera {args.camera}.")
 
     detector = MediaPipeFaceMeshDetector(max_faces=args.max_faces)
-    transcriber: VoskVisualGateTranscriber | None = None
+    transcriber: VisualGateTranscriber | None = None
     started = time.monotonic()
     frames = 0
     try:
         if args.stt:
-            transcriber = VoskVisualGateTranscriber(args.vosk_model)
+            if args.stt_backend == "whisper":
+                transcriber = WhisperVisualGateTranscriber(
+                    model_size=args.whisper_model,
+                    language=args.language,
+                    input_device=args.audio_device,
+                    model_cache_dir=args.whisper_cache,
+                )
+            else:
+                transcriber = VoskVisualGateTranscriber(args.vosk_model)
         vad = VisualVAD(detector=detector, on_event=lambda event: handle_event(event, transcriber))
         while True:
             ok, frame = capture.read()
@@ -119,7 +147,7 @@ def main() -> None:
             cv2.putText(frame, f"FPS: {frames / elapsed:.1f}", (10, frame.shape[0] - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
             cv2.imshow("Visual VAD - q to quit", frame)
             if transcriber is not None:
-                draw_transcript_window(transcriber.snapshot())
+                draw_transcript_window(transcriber.snapshot(), args.stt_backend)
             if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
                 break
     finally:
