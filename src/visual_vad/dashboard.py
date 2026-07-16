@@ -36,8 +36,9 @@ class DashboardConfig:
     language: Optional[str] = "en"
     audio_device: str | int | None = None
     initial_prompt: Optional[str] = None
-    live_update_seconds: float = 0.85
-    live_window_seconds: float = 5.0
+    live_model_size: Optional[str] = None
+    live_update_seconds: float = 0.25
+    live_window_seconds: float = 2.0
 
 
 class DashboardState:
@@ -161,6 +162,7 @@ class DashboardRuntime:
                         input_device=self.config.audio_device,
                         model_cache_dir=self.config.whisper_cache,
                         initial_prompt=self.config.initial_prompt,
+                        live_model_size=self.config.live_model_size,
                         live_update_seconds=self.config.live_update_seconds,
                         live_window_seconds=self.config.live_window_seconds,
                     )

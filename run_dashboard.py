@@ -29,15 +29,20 @@ def main() -> None:
     parser.add_argument("--audio-device", type=parse_audio_device, default=None)
     parser.add_argument("--initial-prompt", default=None)
     parser.add_argument(
+        "--live-whisper-model",
+        default=None,
+        help="Fast model for live drafts (default: tiny.en for English, tiny otherwise)",
+    )
+    parser.add_argument(
         "--live-update-seconds",
         type=float,
-        default=0.85,
+        default=0.25,
         help="Cadence for revisable live Whisper transcript updates",
     )
     parser.add_argument(
         "--live-window-seconds",
         type=float,
-        default=5.0,
+        default=2.0,
         help="Recent-audio window used for revisable live transcript updates",
     )
     parser.add_argument("--no-browser", action="store_true", help="Do not automatically open the dashboard URL")
@@ -55,6 +60,7 @@ def main() -> None:
         language=args.language or None,
         audio_device=args.audio_device,
         initial_prompt=args.initial_prompt,
+        live_model_size=args.live_whisper_model,
         live_update_seconds=args.live_update_seconds,
         live_window_seconds=args.live_window_seconds,
     )

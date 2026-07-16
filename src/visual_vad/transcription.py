@@ -162,11 +162,10 @@ class VoskVisualGateTranscriber:
 class WhisperVisualGateTranscriber:
     """Higher-accuracy, multilingual offline STT for noisy kiosk deployments.
 
-    A rolling window is decoded while the user is speaking. The resulting
-    draft is intentionally revisable: Whisper can correct a word as more
-    context arrives. Every debounced visual speech end queues an immutable,
-    high-confidence pass over that utterance. A later speech start is a new
-    session and never cancels an earlier queued or running transcript.
+    A lightweight streaming recognizer emits provisional words as microphone
+    samples arrive. Whisper then performs the authoritative pass after the
+    visual utterance ends. This split keeps the UI responsive on CPU while
+    retaining Whisper's resilience to accents and noisy kiosk environments.
     """
 
     def __init__(
@@ -179,9 +178,11 @@ class WhisperVisualGateTranscriber:
         compute_type: str = "int8",
         initial_prompt: str | None = None,
         model_cache_dir: str | Path = "models/whisper",
-        live_update_seconds: float = 0.85,
-        live_window_seconds: float = 5.0,
-        minimum_live_seconds: float = 0.80,
+        live_model_size: str | None = None,
+        live_vosk_model_path: str | Path = "models/vosk-model-small-en-us-0.15",
+        live_update_seconds: float = 0.25,
+        live_window_seconds: float = 2.0,
+        minimum_live_seconds: float = 0.20,
         final_beam_size: int = 5,
     ) -> None:
         try:
@@ -204,12 +205,39 @@ class WhisperVisualGateTranscriber:
         self._minimum_live_bytes = int(sample_rate * minimum_live_seconds * 2)
         cache_dir = Path(model_cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        self._model = WhisperModel(
+        self._final_model = WhisperModel(
             model_size,
             device=device,
             compute_type=compute_type,
             download_root=str(cache_dir),
         )
+        # Vosk is genuinely streaming and is used for the instant, editable
+        # draft. Fall back to a small Whisper rolling window only if its local
+        # model is unavailable.
+        self._draft_recognizer_type = None
+        self._draft_model = None
+        try:
+            from vosk import KaldiRecognizer, Model
+
+            draft_model_dir = Path(live_vosk_model_path)
+            if draft_model_dir.is_dir():
+                self._draft_recognizer_type = KaldiRecognizer
+                self._draft_model = Model(str(draft_model_dir))
+        except ImportError:
+            pass
+        resolved_live_model = live_model_size or ("tiny.en" if language == "en" else "tiny")
+        self._live_model = None
+        if self._draft_model is None:
+            self._live_model = (
+                self._final_model
+                if resolved_live_model == model_size
+                else WhisperModel(
+                    resolved_live_model,
+                    device=device,
+                    compute_type=compute_type,
+                    download_root=str(cache_dir),
+                )
+            )
         self._jobs: deque[_WhisperJob] = deque()
         self._lock = threading.Lock()
         self._job_ready = threading.Condition(self._lock)
@@ -217,16 +245,29 @@ class WhisperVisualGateTranscriber:
         self._active_session: int | None = None
         self._recording = False
         self._audio_buffers: dict[int, bytearray] = {}
-        self._preroll: deque[bytes] = deque(maxlen=2)  # 500 ms at the 4,000-sample block size.
+        # Preserve two seconds before visual VAD fires. The streaming draft
+        # receives only its recent 400 ms; the Whisper fallback can use all of
+        # it when the streaming model is unavailable.
+        self._preroll: deque[bytes] = deque(maxlen=40)
         self._last_live_update = 0.0
         self._finalized: list[str] = []
         self._partial = ""
         self._closed = False
         self._worker = threading.Thread(target=self._transcribe_utterances, name="whisper-stt", daemon=True)
         self._worker.start()
+        self._draft_queue: queue.Queue[tuple[int, bytes | None]] = queue.Queue()
+        self._draft_recognizers: dict[int, object] = {}
+        self._draft_worker: threading.Thread | None = None
+        if self._draft_model is not None:
+            self._draft_worker = threading.Thread(
+                target=self._consume_streaming_drafts, name="streaming-draft-stt", daemon=True
+            )
+            self._draft_worker.start()
         self._stream = sd.RawInputStream(
             samplerate=sample_rate,
-            blocksize=4_000,
+            # 50 ms blocks let the live recognizer publish the first words as
+            # they form instead of waiting for Whisper's old 250 ms chunks.
+            blocksize=800,
             dtype="int16",
             channels=1,
             device=input_device,
@@ -243,6 +284,15 @@ class WhisperVisualGateTranscriber:
             for chunk in self._preroll:
                 buffer.extend(chunk)
             self._audio_buffers[self._session_id] = buffer
+            if self._draft_recognizer_type is not None and self._draft_model is not None:
+                self._draft_recognizers[self._session_id] = self._draft_recognizer_type(
+                    self._draft_model, self._sample_rate
+                )
+                # Visual VAD takes a moment to declare speech. Feed only the
+                # most recent 400 ms to recover the opening word, without
+                # allowing old environmental audio to dominate the draft.
+                for chunk in list(self._preroll)[-8:]:
+                    self._draft_queue.put((self._session_id, chunk))
             self._active_session = self._session_id
             self._recording = True
             self._last_live_update = 0.0
@@ -273,10 +323,14 @@ class WhisperVisualGateTranscriber:
             self._jobs.clear()
         self._stream.stop()
         self._stream.close()
+        if self._draft_worker is not None:
+            self._draft_queue.put((-1, None))
         with self._job_ready:
             self._jobs.append(_WhisperJob(-1, b"", False))
             self._job_ready.notify_all()
         self._worker.join(timeout=10.0)
+        if self._draft_worker is not None:
+            self._draft_worker.join(timeout=2.0)
 
     def _on_audio(self, indata: bytes, frames: int, time_info: object, status: object) -> None:
         del frames, time_info, status
@@ -285,14 +339,19 @@ class WhisperVisualGateTranscriber:
             self._preroll.append(chunk)
             if self._recording:
                 self._audio_buffers[self._session_id].extend(chunk)
-                now = time.monotonic()
-                if (
-                    len(self._audio_buffers[self._session_id]) >= self._minimum_live_bytes
-                    and now - self._last_live_update >= self._live_update_seconds
-                ):
-                    audio = self._audio_buffers[self._session_id]
-                    self._enqueue_live_revision(self._session_id, bytes(audio[-self._live_window_bytes :]))
-                    self._last_live_update = now
+                if self._draft_model is not None:
+                    self._draft_queue.put((self._session_id, chunk))
+                    self._partial = "Transcribing live..."
+                else:
+                    now = time.monotonic()
+                    if (
+                        len(self._audio_buffers[self._session_id]) >= self._minimum_live_bytes
+                        and now - self._last_live_update >= self._live_update_seconds
+                    ):
+                        audio = self._audio_buffers[self._session_id]
+                        self._enqueue_live_revision(self._session_id, bytes(audio[-self._live_window_bytes :]))
+                        self._last_live_update = now
+                        self._partial = "Transcribing live..."
 
     def _enqueue_live_revision(self, session_id: int, audio: bytes) -> None:
         # Keep only the newest revision for this utterance when CPU inference
@@ -313,6 +372,29 @@ class WhisperVisualGateTranscriber:
             self._jobs.append(_WhisperJob(session_id, audio, True))
             self._job_ready.notify()
 
+    def _consume_streaming_drafts(self) -> None:
+        """Publish Vosk's mutable partial result without blocking audio I/O."""
+        while True:
+            session_id, chunk = self._draft_queue.get()
+            if session_id == -1:
+                return
+            with self._lock:
+                recognizer = self._draft_recognizers.get(session_id)
+            if recognizer is None or chunk is None:
+                continue
+            try:
+                if recognizer.AcceptWaveform(chunk):
+                    text = json.loads(recognizer.Result()).get("text", "").strip()
+                else:
+                    text = json.loads(recognizer.PartialResult()).get("partial", "").strip()
+                with self._lock:
+                    if session_id == self._active_session and self._recording:
+                        self._partial = text or "Transcribing live..."
+            except Exception:
+                # The final Whisper pass remains available if a provisional
+                # draft cannot be parsed on a particular audio device.
+                continue
+
     def _transcribe_utterances(self) -> None:
         while True:
             with self._job_ready:
@@ -322,7 +404,7 @@ class WhisperVisualGateTranscriber:
             if item.session_id == -1:
                 return
             try:
-                transcript = self._decode(item.audio, self._final_beam_size if item.final else 1) if item.audio else ""
+                transcript = self._decode(item.audio, self._final_beam_size if item.final else 1, item.final) if item.audio else ""
                 with self._lock:
                     if item.final:
                         if transcript:
@@ -335,30 +417,37 @@ class WhisperVisualGateTranscriber:
                         # This is a live, replaceable draft, not an appended
                         # immutable segment. It visibly corrects itself as the
                         # next rolling audio window supplies more context.
-                        self._partial = transcript or "Listening..."
+                        self._partial = transcript or "Transcribing live..."
             except Exception as exc:
                 with self._lock:
                     if item.session_id == self._session_id:
                         self._partial = f"STT error: {exc}"
 
-    def _decode(self, payload: bytes, beam_size: int) -> str:
+    def _decode(self, payload: bytes, beam_size: int, final: bool) -> str:
         audio = np.frombuffer(payload, dtype=np.int16).astype(np.float32) / 32768.0
-        segments, _ = self._model.transcribe(
+        model = self._final_model if final else self._live_model
+        if model is None:
+            return ""
+        segments, _ = model.transcribe(
             audio,
             language=self._language,
             beam_size=beam_size,
-            vad_filter=True,
+            # Visual VAD already selected the active user. Avoid a second VAD
+            # suppressing short live drafts; retain it for the final pass where
+            # it helps reject environmental noise.
+            vad_filter=final,
             vad_parameters={"min_silence_duration_ms": 300},
             condition_on_previous_text=False,
             initial_prompt=self._initial_prompt,
         )
-        accepted = [
-            segment.text.strip()
-            for segment in segments
-            if segment.text.strip()
-            and segment.avg_logprob >= -1.0
-            and segment.no_speech_prob <= 0.60
-        ]
+        accepted = []
+        for segment in segments:
+            text = segment.text.strip()
+            if not text:
+                continue
+            if final and (segment.avg_logprob < -1.0 or segment.no_speech_prob > 0.60):
+                continue
+            accepted.append(text)
         return " ".join(accepted)
 
 
