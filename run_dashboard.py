@@ -40,7 +40,6 @@ def main() -> None:
         default=5.0,
         help="Recent-audio window used for revisable live transcript updates",
     )
-    parser.add_argument("--speech-gap-seconds", type=float, default=1.10, help="Pause before committing a final sentence")
     parser.add_argument("--no-browser", action="store_true", help="Do not automatically open the dashboard URL")
     args = parser.parse_args()
 
@@ -58,7 +57,6 @@ def main() -> None:
         initial_prompt=args.initial_prompt,
         live_update_seconds=args.live_update_seconds,
         live_window_seconds=args.live_window_seconds,
-        speech_gap_seconds=args.speech_gap_seconds,
     )
     server = create_dashboard_server(args.host, args.port, config)
     url = f"http://{args.host}:{args.port}"

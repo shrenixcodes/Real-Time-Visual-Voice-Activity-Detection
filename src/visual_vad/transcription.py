@@ -164,8 +164,9 @@ class WhisperVisualGateTranscriber:
 
     A rolling window is decoded while the user is speaking. The resulting
     draft is intentionally revisable: Whisper can correct a word as more
-    context arrives. After a short visual-VAD gap, a final high-confidence pass
-    over the complete utterance is committed to the transcript.
+    context arrives. Every debounced visual speech end queues an immutable,
+    high-confidence pass over that utterance. A later speech start is a new
+    session and never cancels an earlier queued or running transcript.
     """
 
     def __init__(
@@ -181,7 +182,6 @@ class WhisperVisualGateTranscriber:
         live_update_seconds: float = 0.85,
         live_window_seconds: float = 5.0,
         minimum_live_seconds: float = 0.80,
-        speech_gap_seconds: float = 1.10,
         final_beam_size: int = 5,
     ) -> None:
         try:
@@ -196,13 +196,12 @@ class WhisperVisualGateTranscriber:
         self._sample_rate = sample_rate
         self._language = language
         self._initial_prompt = initial_prompt
-        if min(live_update_seconds, live_window_seconds, minimum_live_seconds, speech_gap_seconds) <= 0:
+        if min(live_update_seconds, live_window_seconds, minimum_live_seconds) <= 0:
             raise ValueError("Live STT timings must be positive.")
         self._final_beam_size = final_beam_size
         self._live_update_seconds = live_update_seconds
         self._live_window_bytes = int(sample_rate * live_window_seconds * 2)
         self._minimum_live_bytes = int(sample_rate * minimum_live_seconds * 2)
-        self._speech_gap_seconds = speech_gap_seconds
         cache_dir = Path(model_cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
         self._model = WhisperModel(
@@ -220,7 +219,6 @@ class WhisperVisualGateTranscriber:
         self._audio_buffers: dict[int, bytearray] = {}
         self._preroll: deque[bytes] = deque(maxlen=2)  # 500 ms at the 4,000-sample block size.
         self._last_live_update = 0.0
-        self._finish_timer: threading.Timer | None = None
         self._finalized: list[str] = []
         self._partial = ""
         self._closed = False
@@ -240,14 +238,6 @@ class WhisperVisualGateTranscriber:
         with self._lock:
             if self._closed or self._recording:
                 return
-            if self._finish_timer is not None and self._active_session is not None:
-                # Visual VAD briefly toggled quiet, then detected speech again.
-                # Keep audio and context in one continuous utterance.
-                self._finish_timer.cancel()
-                self._finish_timer = None
-                self._recording = True
-                self._partial = self._partial or "Listening..."
-                return
             self._session_id += 1
             buffer = bytearray()
             for chunk in self._preroll:
@@ -264,12 +254,10 @@ class WhisperVisualGateTranscriber:
                 return
             session_id = self._session_id
             self._recording = False
-            self._partial = "Listening for a final phrase..."
-            if self._finish_timer is not None:
-                self._finish_timer.cancel()
-            self._finish_timer = threading.Timer(self._speech_gap_seconds, self._queue_final, args=(session_id,))
-            self._finish_timer.daemon = True
-            self._finish_timer.start()
+            self._partial = "Finalizing transcript..."
+        # This must occur after releasing the lock: a new speech start can now
+        # create another session, but it cannot cancel this queued job.
+        self._queue_final(session_id)
 
     def snapshot(self) -> TranscriptSnapshot:
         with self._lock:
@@ -281,9 +269,6 @@ class WhisperVisualGateTranscriber:
                 return
             self._closed = True
             self._recording = False
-            if self._finish_timer is not None:
-                self._finish_timer.cancel()
-                self._finish_timer = None
             self._audio_buffers.clear()
             self._jobs.clear()
         self._stream.stop()
@@ -318,11 +303,10 @@ class WhisperVisualGateTranscriber:
 
     def _queue_final(self, session_id: int) -> None:
         with self._job_ready:
-            if self._closed or self._recording or self._active_session != session_id:
+            if self._closed or self._active_session != session_id:
                 return
             audio = bytes(self._audio_buffers.pop(session_id, b""))
             self._active_session = None
-            self._finish_timer = None
             self._partial = "Finalizing transcript..."
             # Final decoding must come after the newest live revision so that
             # the UI remains responsive until the authoritative result arrives.

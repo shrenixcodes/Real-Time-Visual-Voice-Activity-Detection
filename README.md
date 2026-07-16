@@ -45,7 +45,7 @@ python run_dashboard.py --camera 0 --audio-device 1
 
 It opens at `http://127.0.0.1:8765`. Press `Ctrl+C` in the terminal to stop it. Use `--no-stt` to validate the visual pipeline without opening a microphone.
 
-Whisper now shows a revisable rolling live draft roughly every 0.85 seconds while the primary user speaks. A new visual `speech_start` during a brief pause resumes the same utterance. After 1.1 seconds of silence, Whisper commits a higher-accuracy final line using the complete utterance. For terms such as ticket names or station names, add an initial prompt:
+Whisper now shows a revisable rolling live draft roughly every 0.85 seconds while the primary user speaks. Each debounced visual `speech_end` queues a final, higher-accuracy pass over the full utterance. If the user starts speaking again while that pass is running, the previous transcript keeps running and the new speech is captured as the next session. For terms such as ticket names or station names, add an initial prompt:
 
 ```powershell
 python run_dashboard.py --camera 0 --audio-device 1 --initial-prompt "ticket, platform, station, booking, destination"

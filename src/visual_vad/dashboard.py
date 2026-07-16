@@ -38,7 +38,6 @@ class DashboardConfig:
     initial_prompt: Optional[str] = None
     live_update_seconds: float = 0.85
     live_window_seconds: float = 5.0
-    speech_gap_seconds: float = 1.10
 
 
 class DashboardState:
@@ -164,7 +163,6 @@ class DashboardRuntime:
                         initial_prompt=self.config.initial_prompt,
                         live_update_seconds=self.config.live_update_seconds,
                         live_window_seconds=self.config.live_window_seconds,
-                        speech_gap_seconds=self.config.speech_gap_seconds,
                     )
                 else:
                     transcriber = VoskVisualGateTranscriber(Path("models/vosk-model-small-en-us-0.15"))
